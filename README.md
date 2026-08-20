@@ -27,32 +27,47 @@ DSH 对话中附加图片受部署配置限制（`attachment-local`，默认单�
 - 🩹 **失败兜底不丢图**：单张解码 / 编码失败按原文件继续，批次其余照常压缩；尽力而为仍超限时如实标注；任何图片不会因本插件消失。
 - 🧹 **生命周期零残留**：卸载后监听、通知层与全部副作用清除，行为回官方原样。
 
-## 安装（接入 DSH profile）
+## 安装（接入选定 DSH profile）
 
-DSH 是独立运行时（当前基于 `0.1.0-rc.8` 部署校验），先安装 CLI 一次：
+本插件是一个 DSH 客户端插件包：`dsh plugin add` 会把它的 bundle patch 与 client 清单纳入所选 profile，启动该 profile 即生效。仓库已提交编译产物 `lib/`，git 依赖无需 prepare 钩子即可直接使用。
+
+先安装 DSH CLI：
 
 ```sh
 npm install -g @deepseek-ai/dsh
 ```
 
-### test（试验）profile —— 源码直挂
+然后把插件接入你自己的 profile（把 `<profile>` 换成实际 profile 名，如 `web`）。
+
+### 方式一：GitHub git 依赖（未发布 npm 时推荐；ref 钉定 commit / tag 保证可复现）
 
 ```sh
-dsh plugin --profile test add link:/path/to/dsh-image-compressor
-dsh --profile test
+dsh plugin --profile <profile> add github:FengZhiHen1/dsh-image-compressor#<commit 或 tag>
 ```
 
-### web（稳定）profile —— 发布包或 `github:` 钉定 ref（C-01 红线）
+### 方式二：本地源码（开发 / 试验直挂）
 
 ```sh
-# 方案一：github git 依赖（ref 必须钉死 commit/tag）
-dsh plugin --profile web add github:FengZhiHen1/dsh-image-compressor#<ref>
-
-# 方案二：npm 发布后
-dsh plugin --profile web add dsh-image-compressor
+dsh plugin --profile <profile> add link:/绝对路径/到/dsh-image-compressor
 ```
 
-> 正式引入 web 前请按 `docs/design/dsh-image-compressor/technical-details/deployment.md` 的发布检查清单复核（tarball 含 patch / client bundle / 必需清单；注入依赖边完整；卸载无残留）。
+### 方式三：npm 发布包（发布到 npm 后可用）
+
+```sh
+dsh plugin --profile <profile> add dsh-image-compressor@<version>
+```
+
+随后启动：
+
+```sh
+dsh web          # 或任意 profile：dsh --profile <profile>
+```
+
+不想全局安装 DSH？用 `pnpm dlx` 跑同一条命令：
+
+```sh
+pnpm dlx --package=@deepseek-ai/dsh dsh plugin --profile <profile> add github:FengZhiHen1/dsh-image-compressor#<commit 或 tag>
+```
 
 ## 工作原理
 
