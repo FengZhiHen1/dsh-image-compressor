@@ -1,0 +1,7 @@
+# dsh-image-compressor bundle patch: mounts the plugin into a profile layer
+# stack. Pure client plugin (C-02): no Host Service, no Agent row — the
+# profile's cordis layers see exactly this single row; the client half enters
+# the boot graph through the dsh.client manifest.
+- insert:
+    - id: dsh-image-compressor
+      name: 'dsh-image-compressor'

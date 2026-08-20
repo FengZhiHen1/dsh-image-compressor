@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>dsh-image-compressor probe</title>
+  <script src="../node_modules/react/umd/react.development.js"></script>
+  <script src="../node_modules/react-dom/umd/react-dom.development.js"></script>
+</head>
+<body>
+<pre id="out">pending</pre>
+<script>
+'use strict'
+/* 阶段1 missing evidence 浏览器探针（intake-intercept-route / native-canvas 决策的行亡依赖）。
+ * 每个场景返回 { name, ok, detail }；任一场景抛错则记录 error。
+ * 由 scripts/probe/run-probe.mjs 通过 CDP Runtime.evaluate 调用 window.__runProbe()。
+ */
+const results = []
+const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms) })
+const record = (name, ok, detail) => results.push({ name, ok: Boolean(ok), detail })
+
+function makeFile(name, type, bytes) {
+  const buf = new Uint8Array(bytes)
+  for (let i = 0; i < bytes; i += 1) buf[i] = (i * 31) & 0xff
+  return new File([buf], name, { type })
+}
+
+// ---------------------------------------------------------------------------
+// 1) 向 document 派发构造 DragEvent('drop') 能触发 document 级 drop 监听，
+//    dataTransfer.types 含 'Files'（hasFiles 检查通过）。镜像官方 InputBar.onDrop。
+// ---------------------------------------------------------------------------
+async function probeSyntheticDrop() {
+  const seen = { fired: false, hasFiles: null, preventDefaultCalled: false, names: [] }
+  const onDrop = (event) => {
+    seen.fired = true
+    seen.hasFiles = event.dataTransfer?.types.includes('Files') ?? null
+    event.preventDefault()
+    seen.preventDefaultCalled = true
+    seen.names = [...(event.dataTransfer?.files ?? [])].map((f) => `${f.name}|${f.type}|${f.size}`)
+  }
+  document.addEventListener('drop', onDrop) // bubble phase，同官方
+  const dt = new DataTransfer()
+  dt.items.add(makeFile('a.png', 'image/png', 120))
+  dt.items.add(makeFile('b.jpg', 'image/jpeg', 240))
+  const cancelled = !document.dispatchEvent(
+    new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }),
+  )
+  document.removeEventListener('drop', onDrop)
+  const ok = seen.fired && seen.hasFiles === true && cancelled === true
+    && seen.names.length === 2 && seen.names[0].startsWith('a.png|image/png|120')
+  record('probe-synthetic-drop', ok, JSON.stringify({ ...seen, cancelled }))
+}
+
+// ---------------------------------------------------------------------------
+// 2) React 18 合成事件委托（root 容器）；document 捕获阶段 stopPropagation
+//    能阻断粘贴合成事件（不进入 React onPaste）。
+// ---------------------------------------------------------------------------
+async function probeReactPaste() {
+  if (typeof React === 'undefined' || typeof ReactDOM === 'undefined') {
+    record('probe-react-paste', false, 'React UMD not loaded')
+    return
+  }
+  const log = []
+  const mountHost = document.getElementById('react-mount') ?? (() => {
+    const el = document.createElement('div')
+    el.id = 'react-mount'
+    document.body.appendChild(el)
+    return el
+  })()
+
+  // React 18: createRoot；若无则回退 ReactDOM.render（18 仍可用，带弃用警告）。
+  let dispose
+  try {
+    const root = ReactDOM.createRoot(mountHost)
+    const textarea = React.createElement('textarea', {
+      onPaste: (e) => {
+        log.push('react-onPaste')
+        if (e.clipboardData) log.push(`files=${e.clipboardData.files.length}`)
+        else log.push('no-clipboardData')
+      },
+    })
+    root.render(textarea)
+    dispose = () => root.unmount()
+  } catch (e) {
+    ReactDOM.render(
+      React.createElement('textarea', {
+        onPaste: () => log.push('react-onPaste'),
+      }),
+      mountHost,
+    )
+    dispose = () => { ReactDOM.unmountComponentAtNode(mountHost) }
+  }
+  await sleep(80)
+
+  const ta = mountHost.querySelector('textarea')
+  if (ta === null) {
+    record('probe-react-paste', false, 'textarea not rendered by React')
+    dispose()
+    return
+  }
+
+  // 3a) 无阻断时：构造粘贴事件应触达 React 合成 onPaste。
+  log.length = 0
+  ta.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true }))
+  await sleep(60)
+  const noBlocker = log.slice()
+
+  // 3b) 阻断时：document 捕获阶段 stopPropagation，React 委托不得触发。
+  log.length = 0
+  const blocker = (e) => { e.stopPropagation() }
+  document.addEventListener('paste', blocker, true)
+  ta.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true }))
+  await sleep(60)
+  const withBlocker = log.slice()
+  document.removeEventListener('paste', blocker, true)
+
+  dispose()
+  const ok = noBlocker.length > 0 && withBlocker.length === 0
+  record('probe-react-paste', ok, JSON.stringify({ noBlocker, withBlocker }))
+}
+
+// ---------------------------------------------------------------------------
+// 3) createImageBitmap 解码 4000 万像素级图片（8192x5120=41,943,040 像素）
+//    的时间与是否抛错。默认 maxImagePixels=4000 万，构造刚超限一张。
+// ---------------------------------------------------------------------------
+async function probeDecode40mp() {
+  try {
+    const width = 8192
+    const height = 5120
+    const t0 = performance.now()
+    const canvas = new OffscreenCanvas(width, height)
+    const ctx = canvas.getContext('2d')
+    const gradient = ctx.createLinearGradient(0, 0, width, height)
+    gradient.addColorStop(0, '#102030')
+    gradient.addColorStop(1, '#d0b0a0')
+    ctx.fillStyle = gradient
+    ctx.fillRect(0, 0, width, height)
+    const blob = await canvas.convertToBlob({ type: 'image/png' })
+    const encodeMs = performance.now() - t0
+    const t2 = performance.now()
+    const bitmap = await createImageBitmap(blob)
+    const decodeMs = performance.now() - t2
+    const pixels = bitmap.width * bitmap.height
+    bitmap.close()
+    const ok = pixels === width * height && Number.isFinite(decodeMs)
+    record('probe-decode-40mp', ok, JSON.stringify({
+      width, height, pixels, bytes: blob.size, encodeMs: Math.round(encodeMs), decodeMs: Math.round(decodeMs),
+    }))
+  } catch (e) {
+    record('probe-decode-40mp', false, `ERROR: ${e?.message ?? String(e)}`)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 4) canvas.toBlob('image/webp') 行为：回调 blob.type==='image/webp' 检测路径
+//    是否成立；透明 alpha 是否保留；JPEG/PNG 对照。
+// ---------------------------------------------------------------------------
+async function probeWebpToBlobReliable() {
+  try {
+    const canvas = document.createElement('canvas')
+    canvas.width = 64
+    canvas.height = 64
+    const ctx = canvas.getContext('2d')
+    ctx.fillStyle = 'rgba(120, 60, 0, 0.6)'
+    ctx.fillRect(0, 0, 8, 8) // 顶层半透明
+    ctx.fillStyle = 'rgba(255, 255, 255, 1)'
+    ctx.fillRect(8, 8, 56, 56)
+
+    const toBlobAsync = (mime, quality = 0.85) => new Promise((resolve, reject) => {
+      canvas.toBlob((b) => (b === null ? reject(new Error(`${mime} -> null`)) : resolve(b)), mime, quality)
+    })
+
+    const kinds = {}
+    for (const mime of ['image/webp', 'image/jpeg', 'image/png']) {
+      const blob = await toBlobAsync(mime)
+      kinds[mime] = { type: blob.type, size: blob.size }
+      kinds[`${mime}:bytes`] = Array.from(new Uint8Array(await blob.arrayBuffer()).slice(0, 12))
+    }
+
+    // WebP alpha 采样：(0,0) 应保留 alpha≈0.6*255。
+    const webpBlob = new Blob([new Uint8Array(await (await toBlobAsync('image/webp')).arrayBuffer())], { type: 'image/webp' })
+    const webpBitmap = await createImageBitmap(webpBlob)
+    const checkCanvas = document.createElement('canvas')
+    checkCanvas.width = 64
+    checkCanvas.height = 64
+    const checkCtx = checkCanvas.getContext('2d')
+    checkCtx.clearRect(0, 0, 64, 64)
+    checkCtx.drawImage(webpBitmap, 0, 0)
+    const sample = checkCtx.getImageData(1, 1, 1, 1).data
+    webpBitmap.close()
+
+    const ok = kinds['image/webp'].type === 'image/webp'
+      && sample[3] > 30 && sample[3] < 255
+    record('probe-webp-toblob', ok, JSON.stringify({
+      kinds: { webp: kinds['image/webp'], jpeg: kinds['image/jpeg'], png: kinds['image/png'] },
+      alphaSample: [...sample],
+      detection: kinds['image/webp'].type === 'image/webp',
+    }))
+  } catch (e) {
+    record('probe-webp-toblob', false, `ERROR: ${e?.message ?? String(e)}`)
+  }
+}
+
+window.__runProbe = async () => {
+  results.length = 0
+  await probeSyntheticDrop()
+  await probeReactPaste()
+  await probeDecode40mp()
+  await probeWebpToBlobReliable()
+  document.getElementById('out').textContent = JSON.stringify(results, null, 2)
+  return { results }
+}
+</script>
+</body>
+</html>

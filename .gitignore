@@ -1,0 +1,19 @@
+.DS_Store
+.client-build/
+node_modules
+.pnpm-store/
+
+# Local credentials and environment overrides must never be committed.
+.env
+.env.*
+!.env.example
+.npmrc
+*.pem
+*.key
+
+# Local build/test output. `lib/` is deliberately NOT ignored: the built
+# client artifact is committed so the test profile can consume the package
+# via a `link:` dependency without a prepare hook.
+coverage/
+*.log
+*.tgz
